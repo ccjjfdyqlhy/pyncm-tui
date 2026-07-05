@@ -46,6 +46,7 @@ def main_menu() -> str | None:
     console.print('  [5] 每日签到')
     console.print('  [6] 用户信息')
     console.print('  [7] 切换账号')
+    console.print('  [8] 首选项')
     if player.playing or player.paused:
         console.print('  [n] 播放控制')
     if queue.songs and not player.playing and not player.paused:
@@ -54,7 +55,7 @@ def main_menu() -> str | None:
     console.print('  [x] 退出')
     console.print()
 
-    choices = ['1', '2', '3', '4', '5', '6', '7', '?', 'x']
+    choices = ['1', '2', '3', '4', '5', '6', '7', '8', '?', 'x']
     if player.playing or player.paused:
         choices.append('n')
     if queue.songs and not player.playing and not player.paused:
@@ -83,6 +84,9 @@ def main_menu() -> str | None:
         user_profile_screen()
     elif choice == '7':
         return 'logout'
+    elif choice == '8':
+        from .screens import preferences_screen
+        preferences_screen()
     elif choice == '?':
         from .actions import show_help
         show_help()

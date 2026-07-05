@@ -6,13 +6,13 @@ import time
 import tempfile
 
 import requests
-from rich.text import Text
 from rich.markup import escape
 from rich.console import Group
 
-from .config import console, QUALITY_MAP, MUSIC_DIR
+from .config import console, QUALITY_MAP
 from .key import get_key, _HAS_TERMIOS
 from .helpers import fmt_dur, song_artists, song_album, song_dt, safe_name
+from .helpers import lib_music_dir, lib_cover_dir, lib_meta_dir, lib_ensure_dirs, song_basename
 from .player import player, get_audio_url
 from .queue import queue
 
@@ -26,15 +26,29 @@ def _level_desc(level: str) -> str:
 
 
 def _find_local_file(song: dict) -> str | None:
-    """递归搜索 MUSIC_DIR，找已下载的本地文件"""
+    """在新曲库 music/ 子目录中查找已下载的本地文件。
+    未找到则回退扫描旧版 MUSIC_DIR 根目录（兼容旧结构）。"""
     artists = song_artists(song)
     name = song['name']
     base = f'{safe_name(artists)} - {safe_name(name)}'
 
+    # 1) 新结构：music/ 子目录（快速直接查找）
+    music_dir = lib_music_dir()
+    if os.path.isdir(music_dir):
+        for f in os.listdir(music_dir):
+            fname, ext = os.path.splitext(f)
+            if fname == base and ext.lower() in ('.mp3', '.flac'):
+                return os.path.join(music_dir, f)
+
+    # 2) 回退：旧版 MUSIC_DIR 根目录递归扫描
+    from .config import MUSIC_DIR
     if not os.path.isdir(MUSIC_DIR):
         return None
-
     for dirpath, _, filenames in os.walk(MUSIC_DIR):
+        # 跳过新结构的子目录
+        rel = os.path.relpath(dirpath, MUSIC_DIR)
+        if rel in ('music', 'cover', 'lyric', 'metadata') or rel.startswith(('music/', 'cover/', 'lyric/', 'metadata/')):
+            continue
         for f in filenames:
             fname, ext = os.path.splitext(f)
             if fname == base and ext.lower() in ('.mp3', '.flac'):
@@ -42,8 +56,83 @@ def _find_local_file(song: dict) -> str | None:
     return None
 
 
+def _cover_url(song: dict) -> str:
+    """从歌曲 dict 提取专辑封面 URL"""
+    al = song.get('al', {})
+    return al.get('picUrl', '')
+
+
+def _save_metadata(song: dict, playlists: list[str] | None = None):
+    """保存歌曲元数据到 metadata/ 目录。
+    若已有元数据，合并（保留已有歌单信息）。"""
+    import json
+    meta_dir = lib_meta_dir()
+    os.makedirs(meta_dir, exist_ok=True)
+    mpath = os.path.join(meta_dir, f'{song_basename(song)}.json')
+
+    # 读取已有
+    existing = {}
+    if os.path.exists(mpath):
+        try:
+            with open(mpath, encoding='utf-8') as f:
+                existing = json.load(f)
+        except Exception:
+            pass
+
+    artists = [a.get('name', '') for a in song.get('artists', song.get('ar', []))]
+    al = song.get('al', song.get('album', {}))
+
+    meta = {
+        'id': song['id'],
+        'name': song['name'],
+        'artists': artists,
+        'album': al.get('name', ''),
+        'picUrl': _cover_url(song),
+        'duration': song_dt(song),
+    }
+
+    # 合并已有歌单信息
+    pl = dict(existing.get('playlists', {}))
+    if playlists:
+        for p in playlists:
+            pl[p] = pl.get(p, 0) + 1
+    if pl:
+        meta['playlists'] = pl
+
+    try:
+        with open(mpath, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def download_cover(song: dict, save_dir: str | None = None) -> str | None:
+    """下载专辑封面。
+    若 save_dir 为 None，保存到 cover/ 子目录。
+    返回封面路径。失败返回 None。"""
+    url = _cover_url(song)
+    if not url:
+        return None
+    if save_dir is None:
+        save_dir = lib_cover_dir()
+    os.makedirs(save_dir, exist_ok=True)
+
+    fpath = os.path.join(save_dir, f'{song_basename(song)}.jpg')
+    if os.path.exists(fpath):
+        return fpath
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        with open(fpath, 'wb') as f:
+            f.write(resp.content)
+        return fpath
+    except Exception:
+        return None
+
+
 def _buffer_song(song: dict, level: str = 'standard') -> str | None:
-    """下载歌曲到临时文件，返回路径。失败返回 None。优先检查本地已有文件。"""
+    """下载歌曲到临时文件，返回路径。同时下载封面到同临时目录。
+    失败返回 None。优先检查本地已有文件。"""
     # 优先使用本地文件
     local = _find_local_file(song)
     if local:
@@ -65,6 +154,8 @@ def _buffer_song(song: dict, level: str = 'standard') -> str | None:
             for chunk in resp.iter_content(32768):
                 if chunk:
                     f.write(chunk)
+        # 下载封面到 cover/ 子目录（持久缓存）
+        download_cover(song)
         return tmp_path
     except Exception:
         try:
@@ -186,22 +277,57 @@ def playback_loop():
 
 def _playback_control(path_holder: list, song: dict) -> str:
     """单曲控制循环。path_holder[0] 为当前临时文件路径，音质切换时会更新。
+    使用 Rich Progress (BarColumn bright_cyan) 风格，参考 test_tui.py。
     返回: 'quit' | 'ended' | 'next' | 'prev'"""
     from rich.table import Table
     from rich.progress import Progress, BarColumn, TextColumn
     from rich.live import Live
     from rich.console import Console
+    from rich.text import Text as RText
 
     total_sec = song_dt(song) / 1000.0
     name = song["name"]
     artists = song_artists(song)
     album = song_album(song)
 
-    # 操作栏（静态）
-    c1 = Text()
-    c1.append("  ⏹ [s]  ⏮ [b]  ⏸ [p]  ⏭ [n]  🔀 [m]")
-    c2 = Text()
-    c2.append("  ⏪ [<]  ⏩ [>]  🎚️ [c]  ➕ [+]  ➖ [-]  📋 [l]  🚪 [q]")
+    # ── 封面：检查 cover/ 子目录，找不到则下载 ──
+    cover_path = None
+    base_name = song_basename(song)
+    # 1) cover/ 子目录
+    cover_dir = lib_cover_dir()
+    if os.path.isdir(cover_dir):
+        for f in os.listdir(cover_dir):
+            fn, fext = os.path.splitext(f)
+            if fn == base_name and fext.lower() in ('.jpg', '.jpeg', '.png'):
+                cover_path = os.path.join(cover_dir, f)
+                break
+    # 2) 退回到音频同目录
+    if not cover_path:
+        audio_path = path_holder[0]
+        adir = os.path.dirname(audio_path)
+        if os.path.isdir(adir) and adir != cover_dir:
+            for f in os.listdir(adir):
+                fn, fext = os.path.splitext(f)
+                if fn == base_name and fext.lower() in ('.jpg', '.jpeg', '.png'):
+                    cover_path = os.path.join(adir, f)
+                    break
+    # 3) 仍找不到 → 下载
+    if not cover_path:
+        cover_path = download_cover(song)
+    has_cover = cover_path is not None and os.path.exists(cover_path)
+
+    # ── 进度条 (Rich Progress, 风格参考 test_tui.py) ──
+    progress = Progress(
+        TextColumn("{task.fields[ct]}", style="yellow"),
+        BarColumn(bar_width=40, complete_style="bright_cyan", finished_style="bright_cyan"),
+        TextColumn("{task.fields[tt]}", style="yellow"),
+    )
+    play_task = progress.add_task(
+        '',
+        total=total_sec,
+        ct=fmt_dur(0),
+        tt=fmt_dur(song_dt(song)),
+    )
 
     last_pos = -1.0
     last_paused = None
@@ -215,7 +341,7 @@ def _playback_control(path_holder: list, song: dict) -> str:
     live_console = Console(force_terminal=True)
 
     # 使用 auto_refresh=False，手动控制刷新
-    with Live(console=live_console, auto_refresh=False, refresh_per_second=2) as live:
+    with Live(console=live_console, auto_refresh=False, refresh_per_second=4) as live:
         while True:
             if not player.playing and not player.paused:
                 return "ended"
@@ -273,7 +399,6 @@ def _playback_control(path_holder: list, song: dict) -> str:
                     live.stop()
                     queue_screen()
                     last_pos = -1
-                    # 返回后重新启动 Live
                     continue
                 elif key == "+":
                     player.volume = min(1.0, player.volume + 0.1)
@@ -301,7 +426,7 @@ def _playback_control(path_holder: list, song: dict) -> str:
             if not need_update:
                 continue
 
-            # 更新 last 值
+            # ── 更新 last 值 ──
             last_pos = pos
             last_paused = paused
             last_vol = vol
@@ -310,76 +435,78 @@ def _playback_control(path_holder: list, song: dict) -> str:
             last_src = src
             last_qlt = qlt
 
-            # ── 构建界面 ──
+            # ── 更新进度条 ──
+            progress.update(play_task, completed=pos, ct=fmt_dur(int(pos)), tt=fmt_dur(song_dt(song)))
 
-            # 左侧：歌曲信息
-            info = Table.grid(padding=(0, 2))
-            info.add_column(width=2)
-            info.add_column()
-            info.add_row("💿", f"[bold cyan]{name}[/bold cyan]")
-            info.add_row("🎤", f"[green]{artists}[/green]")
-            info.add_row("💽", f"[dim]{album}[/dim]")
+            # ── 构建界面 (test_tui.py 风格) ──
 
-            # 右侧：播放状态
+            # Header: ✦ PLAYER ✦
+            play_icon = "⏸" if paused else "▶"
+            header_text = RText()
+            header_text.append(f"✦ PLAYER ✦  {play_icon}", style="bold magenta")
+
+            # Track info
+            track_info = Table.grid(padding=(0, 2))
+            track_info.add_column(style="dim", width=8)
+            track_info.add_column()
+            track_info.add_row("Track:", f"[bold cyan]{escape(name)}[/bold cyan]")
+            track_info.add_row("Artist:", f"[green]{escape(artists)}[/green]")
+            track_info.add_row("Album:", f"[dim]{escape(album)}[/dim]")
+
+            # 右侧状态面板
             status = Table.grid(padding=(0, 2))
             status.add_column(width=2, style="dim")
             status.add_column(style="dim")
             status.add_row("📋", qpos)
             status.add_row(mode_icon, mode_cn)
             status.add_row("🔊", f"{int(vol * 100)}%")
-            status.add_row(src_icon, src)
-            status.add_row("🎚️", qlt)
+            status.add_row(src_icon, f"{src} | {qlt}")
+            if has_cover:
+                status.add_row("🖼️", "[dim]封面已缓存[/dim]")
 
             # 布局：左右分栏
             layout = Table.grid(padding=(0, 4))
             layout.add_column(ratio=3)
             layout.add_column(ratio=2, style="dim", justify="right")
-            layout.add_row(info, status)
+            layout.add_row(track_info, status)
 
-            # ── 进度条（手动渲染，总宽度 64）──
-            # 格式：[进度条]  时间   图标
-            time_str = f"{fmt_dur(int(pos * 1000))} / {fmt_dur(song_dt(song))}"
-            play_icon = "⏸️" if paused else "▶️"
+            # ── 操作栏（test_tui 风格: 简洁布局）──
+            ctrl1 = RText()
+            ctrl1.append("  ⏮ [b]    ⏸ [p]    ⏭ [n]   ", style="bold")
+            ctrl2 = RText()
+            ctrl2.append(f"  {mode_icon} {mode_cn} [m]  |  🎚️ {qlt} [c]  |  🔊 {int(vol*100)}% [+]/[-]", style="dim")
+            ctrl3 = RText()
+            ctrl3.append("  ⏪ [<]  ⏩ [>]  📋 [l]  ⏹ [s]  🚪 [q]", style="dim")
 
-            # 计算进度条宽度：64 - 时间长度(13) - 3空格 - emoji(2列) = 46
-            bar_width = 46
-            filled = int((pos / total_sec) * bar_width) if total_sec > 0 else 0
-            filled = max(0, min(filled, bar_width))
-            bar_visual = "█" * filled + "░" * (bar_width - filled)
-            pbar_text = Text()
-            pbar_text.append(bar_visual, style="cyan")
-            pbar_text.append(f"  {time_str}   {play_icon}")
-
-            # ── 组合所有内容 ──
+            # ── 组合 ──
             inner = Group(
+                "",
+                header_text,
                 "",
                 layout,
                 "",
+                progress,
                 "",
-                pbar_text,
+                ctrl1,
+                ctrl2,
+                ctrl3,
                 "",
-                "",
-                c1,
-                "",
-                c2,
-                "",
-                "",
-                "[dim]>[/dim]",  # 输入提示符
+                "[dim]>[/dim]",
             )
 
             live.update(inner, refresh=True)
 
 
 def _download_song_to_disk(song: dict, level: str, download_dir: str | None = None) -> str | None:
-    """下载歌曲到本地磁盘（非临时文件），返回路径。已存在则跳过下载。
-    默认保存到 MUSIC_DIR。"""
-    if download_dir is None:
-        download_dir = MUSIC_DIR
-    os.makedirs(download_dir, exist_ok=True)
+    """下载歌曲到本地 music/ 子目录，返回路径。已存在则跳过。
+    同时保存封面到 cover/ 和元数据到 metadata/。"""
+    lib_ensure_dirs()
+    music_dir = lib_music_dir() if download_dir is None else download_dir
+    os.makedirs(music_dir, exist_ok=True)
 
     ext = '.flac' if level in ('lossless', 'hires') else '.mp3'
-    fname = f'{safe_name(song_artists(song))} - {safe_name(song["name"])}{ext}'
-    fpath = os.path.join(download_dir, fname)
+    fname = f'{song_basename(song)}{ext}'
+    fpath = os.path.join(music_dir, fname)
 
     if os.path.exists(fpath):
         return fpath  # 已存在，直接返回
@@ -392,11 +519,13 @@ def _download_song_to_disk(song: dict, level: str, download_dir: str | None = No
     try:
         resp = requests.get(url, stream=True, timeout=30)
         resp.raise_for_status()
-        total = int(resp.headers.get('content-length', 0))
         with open(fpath, 'wb') as f:
             for chunk in resp.iter_content(32768):
                 if chunk:
                     f.write(chunk)
+        # 下载封面 + 写元数据
+        download_cover(song)
+        _save_metadata(song)
         return fpath
     except Exception:
         try:

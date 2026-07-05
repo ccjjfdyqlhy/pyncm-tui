@@ -391,7 +391,7 @@ def album_detail(album: dict):
             return
         if choice == 'd':
             from .download import download_all_songs
-            download_all_songs(songs, subdir=album['name'])
+            download_all_songs(songs, subdir=album['name'], playlists=[album['name']])
             return
         if choice == 'pd':
             from .actions import play_all_with_download
@@ -478,7 +478,7 @@ def artist_detail(artist: dict):
             return
         if choice == 'd':
             from .download import download_all_songs
-            download_all_songs(songs, subdir=artist['name'])
+            download_all_songs(songs, subdir=artist['name'], playlists=[artist['name']])
             return
         if choice == 'pd':
             from .actions import play_all_with_download
@@ -571,7 +571,7 @@ def playlist_detail(playlist: dict):
             return
         if choice == 'd':
             from .download import download_all_songs
-            download_all_songs(songs, subdir=playlist['name'])
+            download_all_songs(songs, subdir=playlist['name'], playlists=[playlist['name']])
             return
         if choice == 'pd':
             from .actions import play_all_with_download
@@ -892,3 +892,90 @@ def signin_screen():
     console.print()
     console.print('[dim]  [回车] 返回[/dim]')
     Prompt.ask('', default='')
+
+
+# ── preferences ─────────────────────────────────────────────────────────────
+
+def preferences_screen():
+    """首选项：配置默认音质、曲库路径等"""
+    from .preferences import load as prefs_load, save as prefs_save, get as pref_get
+    from .config import QUALITY_MAP
+    from rich.table import Table
+
+    QUALITY_CHOICES = {
+        '1': 'standard  (标准 128kbps)',
+        '2': 'exhigh    (极高 320kbps)',
+        '3': 'lossless  (无损 FLAC)',
+        '4': 'hires     (高解析度 HIRES)',
+    }
+
+    while True:
+        prefs_load()
+        console.clear()
+        console.rule('[bold cyan]首选项[/bold cyan]')
+        console.print()
+
+        music_dir = pref_get('music_dir', '曲库')
+        dq_val = pref_get('default_quality', 'exhigh')
+        dq_key = '2'
+        for k, (lv, _) in QUALITY_MAP.items():
+            if lv == dq_val:
+                dq_key = k
+                break
+        dq_label = QUALITY_CHOICES.get(dq_key, dq_val)
+
+        tbl = Table(box=None, padding=(0, 4))
+        tbl.add_column('选项', style='dim', width=6)
+        tbl.add_column('值', style='cyan')
+        tbl.add_row('[1]', f'曲库路径: [green]{music_dir}[/green]')
+        tbl.add_row('[2]', f'默认音质: [green]{dq_label}[/green]')
+        tbl.add_row('[3]', f'每页显示: [green]{pref_get("max_display", 50)}[/green] 项')
+        console.print(tbl)
+        console.print()
+        console.print('  [s] 保存并刷新')
+        console.print('  [q] 返回')
+        console.print()
+        console.print('[dim]  输入选项序号修改[/dim]')
+        console.print()
+
+        cmd = Prompt.ask('选择', default='q').strip().lower()
+
+        if cmd == 'q':
+            return
+        elif cmd == 's':
+            prefs_save()
+            console.print('[green] 配置已保存，曲库路径和每页显示将在重启后生效[/green]')
+            Prompt.ask('[dim]按回车继续[/dim]', default='')
+            continue
+        elif cmd == '1':
+            console.print()
+            new_dir = Prompt.ask('曲库路径', default=music_dir)
+            from .preferences import set as pref_set
+            pref_set('music_dir', new_dir)
+            console.print(f'[green] 曲库路径 → {new_dir}[/green]')
+            Prompt.ask('[dim]按回车继续[/dim]', default='')
+        elif cmd == '2':
+            console.print()
+            console.print('[bold]选择默认音质:[/bold]')
+            for k, label in QUALITY_CHOICES.items():
+                console.print(f'  [{k}] {label}')
+            q = Prompt.ask('音质', choices=list(QUALITY_CHOICES.keys()), default=dq_key)
+            lv = QUALITY_MAP[q][0]
+            from .preferences import set as pref_set
+            pref_set('default_quality', lv)
+            console.print(f'[green] 默认音质 → {QUALITY_CHOICES[q]}[/green]')
+            Prompt.ask('[dim]按回车继续[/dim]', default='')
+        elif cmd == '3':
+            console.print()
+            try:
+                n = int(Prompt.ask('每页显示项数', default=str(pref_get('max_display', 50))))
+                if n < 10:
+                    n = 10
+                elif n > 200:
+                    n = 200
+                from .preferences import set as pref_set
+                pref_set('max_display', n)
+                console.print(f'[green] 每页显示 → {n} 项[/green]')
+            except ValueError:
+                console.print('[red] 无效数字[/red]')
+            Prompt.ask('[dim]按回车继续[/dim]', default='')

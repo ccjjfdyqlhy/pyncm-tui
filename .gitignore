@@ -48,6 +48,7 @@ env/
 
 # Session files
 .pyncm_session
+.pyncm_prefs.json
 *.session
 
 # IDEs

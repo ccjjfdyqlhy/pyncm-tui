@@ -7,7 +7,23 @@ from .config import console, SESSION_FILE
 from .queue import queue
 from .session import login_screen
 from .menu import main_menu
-from rich.prompt import Prompt
+from .helpers import clear_screen
+from rich.prompt import Prompt, Confirm
+
+# ── 用户按 Enter 提交 → 自动清屏 ──
+_orig_prompt_ask = Prompt.ask
+def _prompt_ask_clear(*a, **k):
+    r = _orig_prompt_ask(*a, **k)
+    clear_screen()
+    return r
+Prompt.ask = _prompt_ask_clear
+
+_orig_confirm_ask = Confirm.ask
+def _confirm_ask_clear(*a, **k):
+    r = _orig_confirm_ask(*a, **k)
+    clear_screen()
+    return r
+Confirm.ask = _confirm_ask_clear
 
 import os
 

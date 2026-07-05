@@ -1,6 +1,7 @@
 # download — download songs with quality selection
 
 import os
+import time
 
 import requests
 from pyncm import apis
@@ -10,9 +11,9 @@ from rich.progress import (
     TransferSpeedColumn, TimeRemainingColumn,
 )
 
-from .config import console, QUALITY_MAP, MUSIC_DIR
-from .helpers import safe_name, song_artists
-from .engine import _find_local_file
+from .config import console, QUALITY_MAP, DEFAULT_QUALITY_KEY
+from .helpers import safe_name, song_artists, song_basename, lib_music_dir, lib_ensure_dirs
+from .engine import _find_local_file, _save_metadata, download_cover
 
 
 def choose_quality_for_download() -> tuple[str, str]:
@@ -20,7 +21,7 @@ def choose_quality_for_download() -> tuple[str, str]:
     console.print('\n[bold]选择品质:[/bold]')
     for k, (_, desc) in QUALITY_MAP.items():
         console.print(f'  [{k}] {desc}')
-    q = Prompt.ask('品质', choices=list(QUALITY_MAP.keys()), default='2')
+    q = Prompt.ask('品质', choices=list(QUALITY_MAP.keys()), default=DEFAULT_QUALITY_KEY)
     return QUALITY_MAP[q]
 
 
@@ -68,8 +69,8 @@ def download_with_progress(url: str, filename: str, quiet: bool = False) -> bool
     return True
 
 
-def download_song(song: dict, subdir: str | None = None):
-    """下载单曲到 {MUSIC_DIR}/[subdir]/"""
+def download_song(song: dict, subdir: str | None = None, playlists: list[str] | None = None):
+    """下载单曲到 music/ 子目录，保存封面 + 元数据"""
     console.clear()
     console.rule('[bold cyan]下载[/bold cyan]')
     console.print()
@@ -86,6 +87,7 @@ def download_song(song: dict, subdir: str | None = None):
     local_file = _find_local_file(song)
     if local_file:
         console.print(f'[green] 本地已存在: {os.path.basename(local_file)}[/green]')
+        _save_metadata(song, playlists)
         if not Confirm.ask('仍要重新下载?'):
             return
 
@@ -125,48 +127,50 @@ def download_song(song: dict, subdir: str | None = None):
             return
 
     ext = '.flac' if level in ('lossless', 'hires') else '.mp3'
-    target = MUSIC_DIR if subdir is None else os.path.join(MUSIC_DIR, safe_name(subdir))
-    os.makedirs(target, exist_ok=True)
-    fname = os.path.join(target, f'{safe_name(artists)} - {safe_name(name)}{ext}')
+    lib_ensure_dirs()
+    music_dir = lib_music_dir()
+    fname = f'{song_basename(song)}{ext}'
+    fpath = os.path.join(music_dir, fname)
 
-    if os.path.exists(fname):
-        console.print(f'[yellow] {os.path.basename(fname)} 已存在[/yellow]')
+    if os.path.exists(fpath):
+        console.print(f'[yellow] {fname} 已存在[/yellow]')
         if not Confirm.ask('覆盖?'):
+            _save_metadata(song, playlists)
             return
 
     console.print(f'[green] 开始下载: {fname}[/green]')
-    download_with_progress(url, fname)
+    if download_with_progress(url, fpath):
+        download_cover(song)
+        _save_metadata(song, playlists)
 
 
-def download_all_songs(songs: list, subdir: str | None = None):
-    """批量下载歌曲到 {MUSIC_DIR}/[subdir]/"""
+def download_all_songs(songs: list, subdir: str | None = None, playlists: list[str] | None = None):
+    """批量下载歌曲到 music/ 子目录"""
     if not songs:
         console.print('[yellow] 无歌曲可下载[/yellow]')
         time.sleep(0.8)
         return
 
-    import time
-
     level, qdesc = choose_quality_for_download()
 
-    target = MUSIC_DIR if subdir is None else os.path.join(MUSIC_DIR, safe_name(subdir))
-    os.makedirs(target, exist_ok=True)
-    label = subdir or '曲库'
-    console.print(f'\n[green]下载 {len(songs)} 首 → {target} ({qdesc})[/green]')
+    lib_ensure_dirs()
+    music_dir = lib_music_dir()
+    console.print(f'\n[green]下载 {len(songs)} 首 → {music_dir} ({qdesc})[/green]')
 
     ok = 0
     fail = 0
     for i, s in enumerate(songs, 1):
         sid = s['id']
         name = s['name']
-        artists = song_artists(s)
         ext = '.flac' if level in ('lossless', 'hires') else '.mp3'
-        fname = os.path.join(target, f'{safe_name(artists)} - {safe_name(name)}{ext}')
+        fname = f'{song_basename(s)}{ext}'
+        fpath = os.path.join(music_dir, fname)
 
-        # 检查本地曲库是否已存在（不限制当前目标目录，扫描整个 MUSIC_DIR）
+        # 检查本地曲库是否已存在
         local_file = _find_local_file(s)
         if local_file:
             console.print(f'  [{i}/{len(songs)}] [green]本地已有: {name}[/green]')
+            _save_metadata(s, playlists)
             ok += 1
             continue
 
@@ -189,7 +193,9 @@ def download_all_songs(songs: list, subdir: str | None = None):
                 fail += 1
                 continue
 
-            if download_with_progress(url, fname, quiet=True):
+            if download_with_progress(url, fpath, quiet=True):
+                download_cover(s)
+                _save_metadata(s, playlists)
                 ok += 1
             else:
                 fail += 1
