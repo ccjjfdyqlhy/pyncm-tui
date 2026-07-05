@@ -12,6 +12,7 @@ from rich.progress import (
 
 from .config import console, QUALITY_MAP, MUSIC_DIR
 from .helpers import safe_name, song_artists
+from .engine import _find_local_file
 
 
 def choose_quality_for_download() -> tuple[str, str]:
@@ -80,6 +81,13 @@ def download_song(song: dict, subdir: str | None = None):
     console.print(f'[bold]歌名:[/bold] {name}')
     console.print(f'[bold]歌手:[/bold] {artists}')
     console.print()
+
+    # 检查本地曲库是否已存在
+    local_file = _find_local_file(song)
+    if local_file:
+        console.print(f'[green] 本地已存在: {os.path.basename(local_file)}[/green]')
+        if not Confirm.ask('仍要重新下载?'):
+            return
 
     level, qdesc = choose_quality_for_download()
 
@@ -155,8 +163,10 @@ def download_all_songs(songs: list, subdir: str | None = None):
         ext = '.flac' if level in ('lossless', 'hires') else '.mp3'
         fname = os.path.join(target, f'{safe_name(artists)} - {safe_name(name)}{ext}')
 
-        if os.path.exists(fname):
-            console.print(f'  [{i}/{len(songs)}] [yellow]已存在: {fname}[/yellow]')
+        # 检查本地曲库是否已存在（不限制当前目标目录，扫描整个 MUSIC_DIR）
+        local_file = _find_local_file(s)
+        if local_file:
+            console.print(f'  [{i}/{len(songs)}] [green]本地已有: {name}[/green]')
             ok += 1
             continue
 

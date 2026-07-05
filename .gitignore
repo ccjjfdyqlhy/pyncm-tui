@@ -77,3 +77,6 @@ desktop.ini
 
 # User directories (optional - modify as needed)
 曲库/
+
+# .dekacode analysis tool output
+.dekacode/

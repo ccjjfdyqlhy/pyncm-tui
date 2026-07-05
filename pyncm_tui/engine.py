@@ -8,9 +8,7 @@ import tempfile
 import requests
 from rich.text import Text
 from rich.markup import escape
-from rich.panel import Panel
 from rich.console import Group
-from rich.progress import Progress, BarColumn, TextColumn
 
 from .config import console, QUALITY_MAP, MUSIC_DIR
 from .key import get_key, _HAS_TERMIOS
@@ -49,7 +47,6 @@ def _buffer_song(song: dict, level: str = 'standard') -> str | None:
     # 优先使用本地文件
     local = _find_local_file(song)
     if local:
-        console.print(f'[green] 本地文件: {os.path.basename(local)}[/green]')
         return local
 
     sid = song['id']
@@ -155,7 +152,13 @@ def playback_loop():
 
         # 使用可变容器，允许音质切换更新路径
         path_holder = [tmp_path]
-        result = _playback_control(path_holder, song)
+
+        # 播放控制循环（可能需要重启多次）
+        while True:
+            result = _playback_control(path_holder, song)
+            if result != "restart":
+                break
+
         tmp_path = path_holder[0]
 
         try:
@@ -185,159 +188,186 @@ def _playback_control(path_holder: list, song: dict) -> str:
     """单曲控制循环。path_holder[0] 为当前临时文件路径，音质切换时会更新。
     返回: 'quit' | 'ended' | 'next' | 'prev'"""
     from rich.table import Table
+    from rich.progress import Progress, BarColumn, TextColumn
+    from rich.live import Live
+    from rich.console import Console
 
     total_sec = song_dt(song) / 1000.0
     name = song["name"]
     artists = song_artists(song)
     album = song_album(song)
 
-    while True:
-        if not player.playing and not player.paused:
-            return "ended"
+    # 操作栏（静态）
+    c1 = Text()
+    c1.append("  ⏹ [s]  ⏮ [b]  ⏸ [p]  ⏭ [n]  🔀 [m]")
+    c2 = Text()
+    c2.append("  ⏪ [<]  ⏩ [>]  🎚️ [c]  ➕ [+]  ➖ [-]  📋 [l]  🚪 [q]")
 
-        pos = player.position
-        pct = min(pos / total_sec * 100, 100) if total_sec > 0 else 0
+    last_pos = -1.0
+    last_paused = None
+    last_vol = -1.0
+    last_qpos = None
+    last_mode = None
+    last_src = None
+    last_qlt = None
 
-        if _HAS_TERMIOS or sys.platform == "win32":
-            console.clear()
+    # 创建一个用于 Live 的 Console（不限制宽度）
+    live_console = Console(force_terminal=True)
 
-        # ── 左侧：歌曲信息 ──
-        info = Table.grid(padding=(0, 2))
-        info.add_column(width=2)  # emoji
-        info.add_column()         # text
-        info.add_row("💿", f"[bold cyan]{name}[/bold cyan]")
-        info.add_row("🎤", f"[green]{artists}[/green]")
-        info.add_row("💽", f"[dim]{album}[/dim]")
+    # 使用 auto_refresh=False，手动控制刷新
+    with Live(console=live_console, auto_refresh=False, refresh_per_second=2) as live:
+        while True:
+            if not player.playing and not player.paused:
+                return "ended"
 
-        # ── 右侧：播放状态 ──
-        qpos = queue.position_str
-        mode_cn = queue.mode_name_cn
-        mode_icon = queue.mode_icon
-        vol = f"{int(player.volume * 100)}%"
-        src = player.source_type
-        src_icon = "💾" if src == "本地" else "🌐"
-        qlt = player.current_level_desc
+            pos = player.position
+            paused = player.paused
+            vol = player.volume
+            qpos = queue.position_str
+            mode_cn = queue.mode_name_cn
+            mode_icon = queue.mode_icon
+            src = player.source_type
+            src_icon = "💾" if src == "本地" else "🌐"
+            qlt = player.current_level_desc
 
-        status = Table.grid(padding=(0, 2))
-        status.add_column(width=2, style="dim")
-        status.add_column(style="dim")
-        status.add_row("📋", qpos)
-        status.add_row(mode_icon, mode_cn)
-        status.add_row("🔊", vol)
-        status.add_row(src_icon, src)
-        status.add_row("🎚️", qlt)
+            # 检查是否有状态变化
+            pos_changed = abs(pos - last_pos) >= 0.5
+            paused_changed = paused != last_paused
+            vol_changed = abs(vol - last_vol) > 0.01
+            qpos_changed = qpos != last_qpos
+            mode_changed = mode_cn != last_mode
+            src_changed = src != last_src
+            qlt_changed = qlt != last_qlt
 
-        # ── 进度条 (Rich) ──
-        time_str = f"{fmt_dur(int(pos * 1000))} / {fmt_dur(song_dt(song))}"
-        play_icon = "⏸️" if player.paused else "▶️"
-        play_style = "bold yellow" if player.paused else "yellow"
+            need_update = pos_changed or paused_changed or vol_changed or qpos_changed or mode_changed or src_changed or qlt_changed
 
-        pbar = Progress(
-            TextColumn("  "),
-            BarColumn(bar_width=None, style="cyan", complete_style="cyan"),
-            TextColumn(f"  {time_str}  "),
-            TextColumn(play_icon, style=play_style),
-            expand=True,
-        )
-        pbar.add_task("", total=max(total_sec, 1), completed=pos)
+            key = get_key(timeout=0.5)
+            if key is not None:
+                need_update = True
 
-        # ── 操作栏 第一行：媒体控制 ──
-        c1 = Text()
-        c1.append("  ")
-        c1.append("⏹ ", style="bold red")
-        c1.append("[s] ", style="red dim")
-        c1.append("⏮ ", style="bold")
-        c1.append("[b] ", style="dim")
-        if player.paused:
-            c1.append("▶️ ", style="bold green")
-        else:
-            c1.append("⏸️ ", style="bold yellow")
-        c1.append("[p] ", style="dim")
-        c1.append("⏭ ", style="bold")
-        c1.append("[n] ", style="dim")
-        c1.append("🔀 ", style="bold")
-        c1.append("[m] ", style="dim")
+                if key == "q":
+                    live.stop()
+                    player.stop()
+                    return "quit"
+                elif key == "p":
+                    player.toggle_pause()
+                    paused = player.paused
+                    paused_changed = True
+                elif key == "s":
+                    live.stop()
+                    player.stop()
+                    return "quit"
+                elif key == "n":
+                    if queue.has_next:
+                        live.stop()
+                        player.stop()
+                        return "next"
+                elif key == "b":
+                    live.stop()
+                    player.stop()
+                    return "prev"
+                elif key == "m":
+                    queue.toggle_mode()
+                elif key == "l":
+                    from .actions import queue_screen
+                    live.stop()
+                    queue_screen()
+                    last_pos = -1
+                    # 返回后重新启动 Live
+                    continue
+                elif key == "+":
+                    player.volume = min(1.0, player.volume + 0.1)
+                    vol = player.volume
+                    vol_changed = True
+                elif key == "-":
+                    player.volume = max(0.0, player.volume - 0.1)
+                    vol = player.volume
+                    vol_changed = True
+                elif key == "c":
+                    _switch_quality(path_holder, song)
+                    qlt = player.current_level_desc
+                    qlt_changed = True
+                elif key == ">":
+                    new_pos = min(pos + 5, total_sec)
+                    _seek_pygame(path_holder[0], song, new_pos)
+                    pos = new_pos
+                    pos_changed = True
+                elif key == "<":
+                    new_pos = max(pos - 5, 0)
+                    _seek_pygame(path_holder[0], song, new_pos)
+                    pos = new_pos
+                    pos_changed = True
 
-        # ── 操作栏 第二行：辅助控制 ──
-        c2 = Text()
-        c2.append("  ")
-        c2.append("⏪ ", style="dim")
-        c2.append("[<] ", style="dim")
-        c2.append("⏩ ", style="dim")
-        c2.append("[>] ", style="dim")
-        c2.append("🎚️ ", style="bold")
-        c2.append("[c] ", style="dim")
-        c2.append("➕ ", style="bold")
-        c2.append("[+] ", style="dim")
-        c2.append("➖ ", style="bold")
-        c2.append("[-] ", style="dim")
-        c2.append("📋 ", style="bold")
-        c2.append("[l] ", style="dim")
-        c2.append("🚪 ", style="bold red")
-        c2.append("[q] ", style="red dim")
+            if not need_update:
+                continue
 
-        # ── 布局：左右分栏 ──
-        layout = Table.grid(padding=(0, 4))
-        layout.add_column(ratio=3)
-        layout.add_column(ratio=2, style="dim", justify="right")
-        layout.add_row(info, status)
+            # 更新 last 值
+            last_pos = pos
+            last_paused = paused
+            last_vol = vol
+            last_qpos = qpos
+            last_mode = mode_cn
+            last_src = src
+            last_qlt = qlt
 
-        # ── 用 Panel 包裹 ──
-        inner = Group(
-            "",
-            layout,
-            "",
-            "",
-            pbar,
-            "",
-            "",
-            c1,
-            "",
-            c2,
-            "",
-        )
+            # ── 构建界面 ──
 
-        console.print(Panel(inner, title="\U0001f3b5 \u64ad\u653e\u4e2d", border_style="cyan"))
+            # 左侧：歌曲信息
+            info = Table.grid(padding=(0, 2))
+            info.add_column(width=2)
+            info.add_column()
+            info.add_row("💿", f"[bold cyan]{name}[/bold cyan]")
+            info.add_row("🎤", f"[green]{artists}[/green]")
+            info.add_row("💽", f"[dim]{album}[/dim]")
 
-        key = get_key(timeout=0.5)
-        if key is None:
-            continue
+            # 右侧：播放状态
+            status = Table.grid(padding=(0, 2))
+            status.add_column(width=2, style="dim")
+            status.add_column(style="dim")
+            status.add_row("📋", qpos)
+            status.add_row(mode_icon, mode_cn)
+            status.add_row("🔊", f"{int(vol * 100)}%")
+            status.add_row(src_icon, src)
+            status.add_row("🎚️", qlt)
 
-        if key == "q":
-            player.stop()
-            return "quit"
-        elif key == "p":
-            player.toggle_pause()
-        elif key == "s":
-            player.stop()
-            return "quit"
-        elif key == "n":
-            if queue.has_next:
-                player.stop()
-                return "next"
-            else:
-                console.print("\n[yellow] \u961f\u5217\u5df2\u5230\u5e95[/yellow]")
-                time.sleep(0.6)
-        elif key == "b":
-            player.stop()
-            return "prev"
-        elif key == "m":
-            queue.toggle_mode()
-        elif key == "l":
-            from .actions import queue_screen
-            queue_screen()
-        elif key == "+":
-            player.volume = min(1.0, player.volume + 0.1)
-        elif key == "-":
-            player.volume = max(0.0, player.volume - 0.1)
-        elif key == "c":
-            _switch_quality(path_holder, song)
-        elif key == ">":
-            new_pos = min(pos + 5, total_sec)
-            _seek_pygame(path_holder[0], song, new_pos)
-        elif key == "<":
-            new_pos = max(pos - 5, 0)
-            _seek_pygame(path_holder[0], song, new_pos)
+            # 布局：左右分栏
+            layout = Table.grid(padding=(0, 4))
+            layout.add_column(ratio=3)
+            layout.add_column(ratio=2, style="dim", justify="right")
+            layout.add_row(info, status)
+
+            # ── 进度条（手动渲染，总宽度 64）──
+            # 格式：[进度条]  时间   图标
+            time_str = f"{fmt_dur(int(pos * 1000))} / {fmt_dur(song_dt(song))}"
+            play_icon = "⏸️" if paused else "▶️"
+
+            # 计算进度条宽度：64 - 时间长度(13) - 3空格 - emoji(2列) = 46
+            bar_width = 46
+            filled = int((pos / total_sec) * bar_width) if total_sec > 0 else 0
+            filled = max(0, min(filled, bar_width))
+            bar_visual = "█" * filled + "░" * (bar_width - filled)
+            pbar_text = Text()
+            pbar_text.append(bar_visual, style="cyan")
+            pbar_text.append(f"  {time_str}   {play_icon}")
+
+            # ── 组合所有内容 ──
+            inner = Group(
+                "",
+                layout,
+                "",
+                "",
+                pbar_text,
+                "",
+                "",
+                c1,
+                "",
+                c2,
+                "",
+                "",
+                "[dim]>[/dim]",  # 输入提示符
+            )
+
+            live.update(inner, refresh=True)
 
 
 def _download_song_to_disk(song: dict, level: str, download_dir: str | None = None) -> str | None:
@@ -408,7 +438,12 @@ def playback_loop_with_download(level: str = 'standard'):
 
         # 使用可变容器（虽然本地文件不会被删除，但保持接口一致）
         path_holder = [fpath]
-        result = _playback_control(path_holder, song)
+
+        # 播放控制循环（可能需要重启多次）
+        while True:
+            result = _playback_control(path_holder, song)
+            if result != "restart":
+                break
 
         if result == 'quit':
             break
