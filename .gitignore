@@ -75,6 +75,7 @@ desktop.ini
 # *.flac
 # *.m4a
 # *.wav
+tests/
 
 # User directories (optional - modify as needed)
 曲库/

@@ -58,7 +58,7 @@ def _find_local_file(song: dict) -> str | None:
 
 def _cover_url(song: dict) -> str:
     """从歌曲 dict 提取专辑封面 URL"""
-    al = song.get('al', {})
+    al = song.get('al', song.get('album', {}))
     return al.get('picUrl', '')
 
 
@@ -107,9 +107,12 @@ def _save_metadata(song: dict, playlists: list[str] | None = None):
 
 
 def download_cover(song: dict, save_dir: str | None = None) -> str | None:
-    """下载专辑封面。
+    """下载专辑封面，保存为 PNG 格式（避免 JPEG 解码兼容性问题）。
     若 save_dir 为 None，保存到 cover/ 子目录。
     返回封面路径。失败返回 None。"""
+    from PIL import Image as PILImage
+    import io
+
     url = _cover_url(song)
     if not url:
         return None
@@ -117,16 +120,40 @@ def download_cover(song: dict, save_dir: str | None = None) -> str | None:
         save_dir = lib_cover_dir()
     os.makedirs(save_dir, exist_ok=True)
 
-    fpath = os.path.join(save_dir, f'{song_basename(song)}.jpg')
-    if os.path.exists(fpath):
-        return fpath
+    base = song_basename(song)
+    png_path = os.path.join(save_dir, f'{base}.png')
+
+    # 已有有效 PNG 缓存
+    if os.path.exists(png_path):
+        try:
+            PILImage.open(png_path).load()
+            return png_path
+        except Exception:
+            pass  # 损坏，重新下载
+
+    # 删除旧 JPG 缓存（可能损坏或不完整）
+    for ext in ('.jpg', '.jpeg'):
+        old = os.path.join(save_dir, f'{base}{ext}')
+        if os.path.exists(old):
+            try:
+                os.remove(old)
+            except Exception:
+                pass
+
     try:
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
-        with open(fpath, 'wb') as f:
-            f.write(resp.content)
-        return fpath
+        img = PILImage.open(io.BytesIO(resp.content))
+        img.load()                         # 验证图像可解码
+        img.save(png_path, 'PNG')
+        return png_path
     except Exception:
+        # 清理可能留下的空文件
+        if os.path.exists(png_path):
+            try:
+                os.remove(png_path)
+            except Exception:
+                pass
         return None
 
 
@@ -311,10 +338,33 @@ def _playback_control(path_holder: list, song: dict) -> str:
                 if fn == base_name and fext.lower() in ('.jpg', '.jpeg', '.png'):
                     cover_path = os.path.join(adir, f)
                     break
-    # 3) 仍找不到 → 下载
+    # 3) 验证找到的封面文件可读取；损坏则删除并重新下载
+    if cover_path and os.path.exists(cover_path):
+        try:
+            from PIL import Image as PILImage
+            PILImage.open(cover_path).load()
+        except Exception:
+            try:
+                os.remove(cover_path)
+            except Exception:
+                pass
+            cover_path = None
+    # 4) 仍找不到或损坏 → 下载
     if not cover_path:
         cover_path = download_cover(song)
     has_cover = cover_path is not None and os.path.exists(cover_path)
+
+    # ── 生成封面 ASCII 艺术（保留颜色）──
+    cover_art_renderable = None
+    if has_cover and cover_path:
+        try:
+            from ascii_magic import AsciiArt
+            from ascii_magic.ascii_art import Modes
+            art = AsciiArt.from_image(str(cover_path))
+            ansi_str = art._img_to_art(columns=40, mode=Modes.TERMINAL, char='\u2588')
+            cover_art_renderable = RText.from_ansi(ansi_str)
+        except Exception:
+            cover_art_renderable = None
 
     # ── 进度条 (Rich Progress, 风格参考 test_tui.py) ──
     progress = Progress(
@@ -461,8 +511,8 @@ def _playback_control(path_holder: list, song: dict) -> str:
             status.add_row(mode_icon, mode_cn)
             status.add_row("🔊", f"{int(vol * 100)}%")
             status.add_row(src_icon, f"{src} | {qlt}")
-            if has_cover:
-                status.add_row("🖼️", "[dim]封面已缓存[/dim]")
+            if cover_art_renderable is not None:
+                status.add_row("🎨", "[dim]ASCII 封面[/dim]")
 
             # 布局：左右分栏
             layout = Table.grid(padding=(0, 4))
@@ -479,9 +529,14 @@ def _playback_control(path_holder: list, song: dict) -> str:
             ctrl3.append("  ⏪ [<]  ⏩ [>]  📋 [l]  ⏹ [s]  🚪 [q]", style="dim")
 
             # ── 组合 ──
-            inner = Group(
+            group_items = [
                 "",
                 header_text,
+            ]
+            if cover_art_renderable is not None:
+                group_items.append("")
+                group_items.append(cover_art_renderable)
+            group_items.extend([
                 "",
                 layout,
                 "",
@@ -492,7 +547,8 @@ def _playback_control(path_holder: list, song: dict) -> str:
                 ctrl3,
                 "",
                 "[dim]>[/dim]",
-            )
+            ])
+            inner = Group(*group_items)
 
             live.update(inner, refresh=True)
 
