@@ -1,4 +1,5 @@
 # engine — playback loop & per-song control
+from __future__ import annotations
 
 import os
 import sys

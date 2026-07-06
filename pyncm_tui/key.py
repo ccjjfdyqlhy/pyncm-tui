@@ -1,4 +1,5 @@
 # key — non-blocking single-key input
+from __future__ import annotations
 
 import sys
 import select

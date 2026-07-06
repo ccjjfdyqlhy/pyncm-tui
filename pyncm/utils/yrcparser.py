@@ -1,3 +1,4 @@
+from __future__ import annotations
 import re
 from json import loads
 from .lrcparser import LrcRegexes, stamp2tag

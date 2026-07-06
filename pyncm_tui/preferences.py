@@ -1,4 +1,5 @@
 # preferences — config file read/write
+from __future__ import annotations
 
 import json
 import os

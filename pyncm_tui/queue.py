@@ -1,4 +1,5 @@
 # queue — playback queue & modes
+from __future__ import annotations
 
 
 class PlaybackQueue:

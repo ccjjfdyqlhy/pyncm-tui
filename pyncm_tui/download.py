@@ -1,4 +1,5 @@
 # download — download songs with quality selection
+from __future__ import annotations
 
 import os
 import time

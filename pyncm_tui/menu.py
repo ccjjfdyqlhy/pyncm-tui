@@ -1,4 +1,5 @@
 # menu — main menu screen
+from __future__ import annotations
 
 from pyncm import getCurrentSession
 from rich.prompt import Prompt

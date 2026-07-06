@@ -1,4 +1,5 @@
 # player — pygame mixer singleton
+from __future__ import annotations
 
 import os
 import subprocess
