@@ -8,6 +8,8 @@ import tempfile
 import pygame
 from pyncm import apis
 
+from .config import console
+
 
 def _flac_to_wav(flac_path: str) -> str | None:
     """用 ffmpeg 将 FLAC 转码为临时 WAV，返回 WAV 路径。失败返回 None。"""
@@ -110,7 +112,8 @@ class Player:
 
     def stop(self):
         pygame.mixer.music.stop()
-        pygame.mixer.music.unload()
+        if hasattr(pygame.mixer.music, 'unload'):
+            pygame.mixer.music.unload()
         self.paused = False
         if self._converted:
             try:
@@ -137,9 +140,20 @@ def get_audio_url(sid: int, level: str = 'standard') -> str | None:
     for lv in [level, 'exhigh', 'standard']:
         try:
             r = apis.track.getTrackAudioV1([sid], level=lv)
-            data = r.get('data', [])
-            if data and data[0].get('url'):
-                return data[0]['url']
-        except Exception:
-            pass
+            if not isinstance(r, dict):
+                console.print(f'[dim]get_audio_url: 非 dict 返回 ({type(r).__name__})[/dim]')
+                continue
+            data = r.get('data')
+            if not isinstance(data, list) or not data:
+                continue
+            item = data[0]
+            if isinstance(item, dict) and item.get('url'):
+                return item['url']
+            # code != 200 或 url=None → 不可用
+            code = item.get('code') if isinstance(item, dict) else None
+            if code and code != 200:
+                continue
+        except Exception as e:
+            console.print(f'[dim]get_audio_url(sid={sid}, lv={lv}): {type(e).__name__}: {e}[/dim]')
+            continue
     return None

@@ -230,7 +230,8 @@ def _seek_pygame(audio_file: str, song: dict, pos_sec: float):
     """Seek by reloading audio at approximate position"""
     import pygame
     pygame.mixer.music.stop()
-    pygame.mixer.music.unload()
+    if hasattr(pygame.mixer.music, 'unload'):
+        pygame.mixer.music.unload()
     pygame.mixer.music.load(audio_file)
     pygame.mixer.music.set_volume(player.volume)
     pygame.mixer.music.play(start=pos_sec)
